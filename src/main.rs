@@ -22,48 +22,72 @@ impl LinuxCommandAssistant {
         }
     }
 
-    async fn run(&mut self) -> Result<()> {
+  async fn run(&mut self) -> Result<()> {
         let config = RustylineConfig::builder()
             .history_ignore_space(true)
             .completion_type(rustyline::CompletionType::List)
             .build();
         let mut rl = Editor::with_config(config)?;
+        rl.set_helper(Some(LinuxCommandCompleter));
 
         loop {
-            let prompt = if self.is_ai_mode {
-                "kaka-ai> "
-            } else {
-                "$ "
+            let prompt = if self.is_command_mode { 
+                format!("{}$ {}", BLUE, RESET) 
+            } else { 
+                format!("{}kaka-ai> {}", YELLOW, RESET) 
             };
-            let readline = rl.readline(prompt);
+            let readline = rl.readline(&prompt);
 
             match readline {
                 Ok(line) => {
-                    if line.trim() == "exit" {
+                    let line = line.trim();
+                    if line.eq_ignore_ascii_case("exit") {
                         break;
                     }
 
-                    if line.trim() == "!" {
-                        self.is_ai_mode = !self.is_ai_mode;
-                        println!("{}", if self.is_ai_mode {
-                            "Entered AI mode. Type '!' to exit."
-                        } else {
-                            "Exited AI mode."
-                        });
+                    if line.eq_ignore_ascii_case("reset") {
+                        self.context.clear();
+                        self.recent_interactions.clear();
+                        println!("Context and recent interactions have been reset.");
                         continue;
                     }
 
-                    if !self.is_ai_mode {
-                        self.capture_command_output(&line)?;
+                    if !line.is_empty() && !line.starts_with('#') {
+                        self.add_to_history(line.to_string());
+                        rl.add_history_entry(line);
+                    }
+
+                    if line == "!" {
+                        self.is_command_mode = !self.is_command_mode;
+                        if self.is_command_mode {
+                            println!("Entered Linux command mode. Type '!' to exit.");
+                        } else {
+                            println!("Exited Linux command mode.");
+                        }
+                        continue;
+                    }
+
+                    if self.is_command_mode {
+                        match self.execute_command(line) {
+                            Ok(_) => (), // 命令已经直接执行，输出已经显示在终端上
+                            Err(e) => println!("Error executing command: {}", e),
+                        }
                     } else {
-                        self.handle_ai_interaction(&line).await?;
+                        match self.get_ai_response(line).await {
+                            Ok(response) => {
+                                println!("kaka-AI: {}", response);
+                                self.update_context(line, &response);
+                                self.add_to_recent_interactions(format!("User: {}\nAI: {}", line, response));
+                            }
+                            Err(e) => println!("Error getting AI response: {}", e),
+                        }
                     }
                 }
-                Err(rustyline::error::ReadlineError::Interrupted) => {
+                Err(ReadlineError::Interrupted) => {
                     println!("CTRL-C");
                     break;
                 }
-                Err(rustyline::error::ReadlineError::Eof) => {
+                Err(ReadlineError::Eof) => {
                     println!("CTRL-D");
                     break;
                 }
@@ -76,6 +100,19 @@ impl LinuxCommandAssistant {
 
         Ok(())
     }
+
+    fn execute_command(&mut self, command: &str) -> Result<()> {
+    // 直接执行命令，不做任何封装
+    std::process::Command::new(command)
+        .status()
+        .context("Failed to execute command")?;
+
+    // 只记录执行的命令
+    self.add_to_recent_interactions(format!("Executed command: {}", command));
+
+    Ok(())
+}
+
 
     fn capture_command_output(&mut self, command: &str) -> Result<()> {
         let mut child = Command::new("sh")
