@@ -60,6 +60,6 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./target/x86_64-unknown-linux-musl/release/linux-ai
+        asset_path: ./target/x86_64-unknown-linux-musl/release/linux_command_assistant
         asset_name: linux_command_assistant-${{ github.event.inputs.version }}
         asset_content_type: application/octet-stream
