@@ -1,5 +1,6 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
+
 use anyhow::{Context, Result};
 use rustyline::Editor;
 use rustyline::config::Config as RustylineConfig;
