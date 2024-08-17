@@ -53,6 +53,7 @@ struct LinuxCommandAssistant {
     recent_interactions: VecDeque<String>,
     command_history: Vec<String>,
     is_command_mode: bool,
+    excluded_commands: Vec<String>,
     //plugin_manager: PluginManager,
 }
 
@@ -73,8 +74,7 @@ struct Choice {
 }
 
 impl LinuxCommandAssistant {
-     // 添加一个新的字段来存储排除的命令
-    excluded_commands: Vec<String>,
+
     fn new(config: Config) -> Result<Self> {
         //
         let excluded_commands = vec![
