@@ -1,166 +1,172 @@
-use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use anyhow::Result;
+use clap::Parser;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, VecDeque};
+use std::process::Command;
+use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
-use rustyline::Editor;
-use rustyline::config::Config as RustylineConfig;
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[arg(short, long)]
+    config: String,
 
-struct LinuxCommandAssistant {
-    config: Config,
-    context: Vec<Message>,
-    recent_interactions: VecDeque<String>,
-    is_ai_mode: bool,
+    #[arg(short, long)]
+    command: String,
+
+    #[arg(long, default_value = "10485760")] // 默认10MB
+    max_cache_size: usize,
+
+    #[arg(long, default_value = "3600")] // 默认1小时
+    max_cache_age: u64,
 }
 
-impl LinuxCommandAssistant {
-    fn new(config: Config) -> Self {
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    record_commands: HashSet<String>,
+}
+
+struct CommandRecord {
+    command: String,
+    stdout: String,
+    stderr: String,
+    timestamp: SystemTime,
+    size: usize,
+}
+
+struct MemoryCache {
+    records: VecDeque<CommandRecord>,
+    max_size_bytes: usize,
+    current_size_bytes: usize,
+    max_age: Duration,
+}
+
+impl CommandRecord {
+    fn new(command: String, stdout: String, stderr: String) -> Self {
+        let size = command.len() + stdout.len() + stderr.len();
         Self {
-            config,
-            context: Vec::new(),
-            recent_interactions: VecDeque::new(),
-            is_ai_mode: false,
+            command,
+            stdout,
+            stderr,
+            timestamp: SystemTime::now(),
+            size,
+        }
+    }
+}
+
+impl MemoryCache {
+    fn new(max_size_bytes: usize, max_age: Duration) -> Self {
+        Self {
+            records: VecDeque::new(),
+            max_size_bytes,
+            current_size_bytes: 0,
+            max_age,
         }
     }
 
-  async fn run(&mut self) -> Result<()> {
-        let config = RustylineConfig::builder()
-            .history_ignore_space(true)
-            .completion_type(rustyline::CompletionType::List)
-            .build();
-        let mut rl = Editor::with_config(config)?;
-        rl.set_helper(Some(LinuxCommandCompleter));
-
-        loop {
-            let prompt = if self.is_command_mode { 
-                format!("{}$ {}", BLUE, RESET) 
-            } else { 
-                format!("{}kaka-ai> {}", YELLOW, RESET) 
-            };
-            let readline = rl.readline(&prompt);
-
-            match readline {
-                Ok(line) => {
-                    let line = line.trim();
-                    if line.eq_ignore_ascii_case("exit") {
-                        break;
-                    }
-
-                    if line.eq_ignore_ascii_case("reset") {
-                        self.context.clear();
-                        self.recent_interactions.clear();
-                        println!("Context and recent interactions have been reset.");
-                        continue;
-                    }
-
-                    if !line.is_empty() && !line.starts_with('#') {
-                        self.add_to_history(line.to_string());
-                        rl.add_history_entry(line);
-                    }
-
-                    if line == "!" {
-                        self.is_command_mode = !self.is_command_mode;
-                        if self.is_command_mode {
-                            println!("Entered Linux command mode. Type '!' to exit.");
-                        } else {
-                            println!("Exited Linux command mode.");
-                        }
-                        continue;
-                    }
-
-                    if self.is_command_mode {
-                        match self.execute_command(line) {
-                            Ok(_) => (), // 命令已经直接执行，输出已经显示在终端上
-                            Err(e) => println!("Error executing command: {}", e),
-                        }
-                    } else {
-                        match self.get_ai_response(line).await {
-                            Ok(response) => {
-                                println!("kaka-AI: {}", response);
-                                self.update_context(line, &response);
-                                self.add_to_recent_interactions(format!("User: {}\nAI: {}", line, response));
-                            }
-                            Err(e) => println!("Error getting AI response: {}", e),
-                        }
-                    }
-                }
-                Err(ReadlineError::Interrupted) => {
-                    println!("CTRL-C");
-                    break;
-                }
-                Err(ReadlineError::Eof) => {
-                    println!("CTRL-D");
-                    break;
-                }
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    break;
-                }
+    fn add(&mut self, record: CommandRecord) {
+        // 移除过旧的记录
+        let now = SystemTime::now();
+        while let Some(front) = self.records.front() {
+            if now.duration_since(front.timestamp).unwrap() > self.max_age {
+                let removed = self.records.pop_front().unwrap();
+                self.current_size_bytes -= removed.size;
+            } else {
+                break;
             }
         }
 
-        Ok(())
+        // 移除记录直到有足够的空间
+        while self.current_size_bytes + record.size > self.max_size_bytes && !self.records.is_empty() {
+            let removed = self.records.pop_front().unwrap();
+            self.current_size_bytes -= removed.size;
+        }
+
+        // 添加新记录
+        self.current_size_bytes += record.size;
+        self.records.push_back(record);
     }
 
-    fn execute_command(&mut self, command: &str) -> Result<()> {
-    // 直接执行命令，不做任何封装
-    std::process::Command::new(command)
-        .status()
-        .context("Failed to execute command")?;
-
-    // 只记录执行的命令
-    self.add_to_recent_interactions(format!("Executed command: {}", command));
-
-    Ok(())
+    fn get_context(&self) -> String {
+        self.records
+            .iter()
+            .map(|r| format!(
+                "Command: {}\nTimestamp: {:?}\nStdout: {}\nStderr: {}\n",
+                r.command,
+                r.timestamp,
+                r.stdout,
+                r.stderr
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
+async fn interact_with_openai(client: &Client, context: &str) -> Result<String> {
+    // 注意：这里需要替换为你的OpenAI API密钥
+    let api_key = "your_openai_api_key";
 
-    fn capture_command_output(&mut self, command: &str) -> Result<()> {
-        let mut child = Command::new("sh")
+    let response = client
+        .post("https://api.openai.com/v1/chat/completions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&serde_json::json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant analyzing command line output."},
+                {"role": "user", "content": format!("Analyze the following command outputs:\n\n{}", context)}
+            ]
+        }))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    Ok(response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("No response")
+        .to_string())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let config = std::fs::read_to_string(&args.config)?;
+    let config: Config = serde_yaml::from_str(&config)?;
+
+    let mut cache = MemoryCache::new(
+        args.max_cache_size,
+        Duration::from_secs(args.max_cache_age)
+    );
+    let client = Client::new();
+
+    if config.record_commands.contains(&args.command) {
+        let output = Command::new("sh")
             .arg("-c")
-            .arg(command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to execute command")?;
+            .arg(&args.command)
+            .output()?;
 
-        let mut output = String::new();
-        if let Some(stdout) = child.stdout.take() {
-            io::copy(&mut stdout, &mut io::stdout())?;
-            io::copy(&mut stdout, &mut output)?;
-        }
-        if let Some(stderr) = child.stderr.take() {
-            io::copy(&mut stderr, &mut io::stderr())?;
-            io::copy(&mut stderr, &mut output)?;
-        }
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-        let status = child.wait()?;
+        println!("Command: {}", args.command);
+        println!("Stdout: {}", stdout);
+        println!("Stderr: {}", stderr);
 
-        // 记录命令和输出
-        if !self.is_long_running_command(command) {
-            self.add_to_recent_interactions(format!("$ {}\n{}", command, output));
-        }
+        cache.add(CommandRecord::new(args.command, stdout, stderr));
 
-        if !status.success() {
-            println!("Command failed with exit code: {:?}", status.code());
-        }
-
-        Ok(())
+        // 与OpenAI API交互
+        let context = cache.get_context();
+        let analysis = interact_with_openai(&client, &context).await?;
+        println!("\nOpenAI Analysis:\n{}", analysis);
+    } else {
+        println!("Command not in record list. Executing without recording.");
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(&args.command)
+            .status()?;
+        std::process::exit(status.code().unwrap_or(1));
     }
 
-    fn is_long_running_command(&self, command: &str) -> bool {
-        command.starts_with("top") || command.starts_with("vim") || command.starts_with("nano")
-    }
-
-    fn add_to_recent_interactions(&mut self, interaction: String) {
-        self.recent_interactions.push_back(interaction);
-        if self.recent_interactions.len() > self.config.max_recent_interactions {
-            self.recent_interactions.pop_front();
-        }
-    }
-
-    async fn handle_ai_interaction(&mut self, input: &str) -> Result<()> {
-        // 实现与 OpenAI 交互的逻辑
-        // ...
-        Ok(())
-    }
+    Ok(())
 }
