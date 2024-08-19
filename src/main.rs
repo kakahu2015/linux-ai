@@ -104,7 +104,6 @@ impl MemoryCache {
     }
 }
 
-use std::env;
 
 async fn interact_with_openai(client: &Client, context: &str) -> Result<String> {
     let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
