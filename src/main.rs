@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 use std::collections::VecDeque;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const MAX_ENTRIES: usize = 10;
 
@@ -33,20 +33,19 @@ fn main() -> io::Result<()> {
         history.push_back(command.to_string());
 
         // 执行命令
-        match Command::new(command.split_whitespace().next().unwrap_or(""))
-            .args(command.split_whitespace().skip(1))
-            .output()
-        {
-            Ok(output) => {
-                io::stdout().write_all(&output.stdout)?;
-                io::stderr().write_all(&output.stderr)?;
-                if !output.status.success() {
-                    eprintln!("Command failed with exit code: {:?}", output.status.code());
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to execute command: {}", e);
-            }
+        let mut parts = command.split_whitespace();
+        let command = parts.next().unwrap_or("");
+        let args: Vec<&str> = parts.collect();
+
+        let status = Command::new(command)
+            .args(&args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+
+        if !status.success() {
+            eprintln!("Command failed with exit code: {:?}", status.code());
         }
     }
 
