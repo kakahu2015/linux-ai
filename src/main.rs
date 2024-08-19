@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
+use std::env;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -103,9 +104,10 @@ impl MemoryCache {
     }
 }
 
+use std::env;
+
 async fn interact_with_openai(client: &Client, context: &str) -> Result<String> {
-    // 注意：这里需要替换为你的OpenAI API密钥
-    let api_key = "your_openai_api_key";
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
 
     let response = client
         .post("https://api.openai.com/v1/chat/completions")
