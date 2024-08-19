@@ -1,55 +1,95 @@
-use std::io::{self, Write, Read};
-use std::collections::VecDeque;
-use std::process::Command;
+use std::sync::Arc;
+use std::io::{self, BufRead, Read};
+use std::thread;
+use std::env;
+use parking_lot::Mutex;
+use serde::{Serialize, Deserialize};
+use reqwest;
 
-const MAX_ENTRIES: usize = 10;
+#[derive(Clone, Serialize, Deserialize)]
+struct CommandRecord {
+    input: String,
+    output: String,
+}
 
-fn main() -> io::Result<()> {
-    let mut history = VecDeque::with_capacity(MAX_ENTRIES);
-    let mut input = String::new();
+type SharedMemory = Arc<Mutex<Vec<CommandRecord>>>;
+
+fn listener_thread(shared_memory: SharedMemory) {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
 
     loop {
-        print!("$ ");
-        io::stdout().flush()?;
+        let mut input = String::new();
+        stdin.lock().read_line(&mut input).unwrap();
+        input = input.trim().to_string();
 
-        // 使用 `read` 方法读取用户输入，并检查是否为 `Ctrl + q`
-        let mut buffer = [0; 1];
-        if io::stdin().read(&mut buffer)? == 0 || (buffer[0] == 3 && input.is_empty()) {
-            break; // EOF or Ctrl + q
-        }
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
 
-        // 将用户输入添加到 `input` 字符串
-        input.push(buffer[0] as char);
-
-        // 如果用户输入回车，则处理命令
-        if input.ends_with('\n') {
-            let command = input.trim();
-            if !command.is_empty() {
-                // 添加命令到历史
-                if history.len() >= MAX_ENTRIES {
-                    history.pop_front();
-                }
-                history.push_back(command.to_string());
-
-                // 执行命令
-                let status = Command::new(command.split_whitespace().next().unwrap_or(""))
-                    .args(command.split_whitespace().skip(1))
-                    .status();
-
-                match status {
-                    Ok(status) => {
-                        if !status.success() {
-                            eprintln!("Command failed: {}", command);
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Error executing command: {}", e);
-                    }
-                }
-            }
-            input.clear(); // 清空输入缓冲区
+        let mut memory = shared_memory.lock();
+        memory.push(CommandRecord { input, output });
+        if memory.len() > 10 {
+            memory.remove(0);
         }
     }
+}
+
+async fn ai_dialog(shared_memory: SharedMemory) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    
+    // 从环境变量读取 API 密钥
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY not set");
+    
+    loop {
+        print!("AI> ");
+        io::stdout().flush()?;
+        
+        let mut query = String::new();
+        io::stdin().read_line(&mut query)?;
+        
+        if query.trim() == "exit" {
+            break;
+        }
+        
+        let memory = shared_memory.lock();
+        let context: Vec<CommandRecord> = memory.clone();
+        
+        let prompt = format!(
+            "Recent commands and outputs:\n{}\n\nUser query: {}",
+            context.iter()
+                .map(|record| format!("Command: {}\nOutput: {}", record.input, record.output))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            query.trim()
+        );
+        
+        let response = client
+            .post("https://api.openai.com/v1/engines/davinci-codex/completions")
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&serde_json::json!({
+                "prompt": prompt,
+                "max_tokens": 150
+            }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        println!("AI: {}", response["choices"][0]["text"].as_str().unwrap());
+    }
+    
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let shared_memory: SharedMemory = Arc::new(Mutex::new(Vec::new()));
+    
+    let listener_memory = shared_memory.clone();
+    thread::spawn(move || {
+        listener_thread(listener_memory);
+    });
+
+    tokio::runtime::Runtime::new()?.block_on(ai_dialog(shared_memory))?;
 
     Ok(())
 }
