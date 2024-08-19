@@ -1,7 +1,6 @@
-use std::io::{self, Write};
+use std::io::{self, Write, Read};
 use std::collections::VecDeque;
 use std::process::Command;
-use std::io::Read;
 
 const MAX_ENTRIES: usize = 10;
 
