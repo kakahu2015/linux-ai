@@ -1,49 +1,40 @@
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use std::io::{self, Write};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::process::Command;
 
 const MAX_ENTRIES: usize = 10;
 
-#[derive(Clone, Debug)]
-struct CommandEntry {
-    input: String,
-    output: String,
-}
-
-#[tokio::main]
-async fn main() {
-    let buffer = Arc::new(Mutex::new(VecDeque::with_capacity(MAX_ENTRIES)));
-    
-    let mut reader = BufReader::new(tokio::io::stdin());
-    let mut writer = tokio::io::stdout();
+fn main() -> io::Result<()> {
+    let mut history = VecDeque::with_capacity(MAX_ENTRIES);
     let mut input = String::new();
 
     loop {
+        print!("$ ");
+        io::stdout().flush()?;
+
         input.clear();
-        writer.write_all(b"$ ").await.unwrap();
-        writer.flush().await.unwrap();
-
-        if reader.read_line(&mut input).await.unwrap() == 0 {
-            break;
+        if io::stdin().read_line(&mut input)? == 0 {
+            break; // EOF
         }
 
-        let input = input.trim().to_string();
-        let output = format!("Output for: {}", input);
+        let command = input.trim();
+        if !command.is_empty() {
+            // 添加命令到历史
+            if history.len() >= MAX_ENTRIES {
+                history.pop_front();
+            }
+            history.push_back(command.to_string());
 
-        let mut buffer = buffer.lock().await;
-        buffer.push_back(CommandEntry { input, output: output.clone() });
-        if buffer.len() > MAX_ENTRIES {
-            buffer.pop_front();
-        }
+            // 直接执行命令
+            let status = Command::new(command.split_whitespace().next().unwrap_or(""))
+                .args(command.split_whitespace().skip(1))
+                .status()?;
 
-        writer.write_all(output.as_bytes()).await.unwrap();
-        writer.write_all(b"\n").await.unwrap();
-
-        // 打印当前缓冲区内容
-        println!("Current buffer:");
-        for (i, entry) in buffer.iter().enumerate() {
-            println!("{}: {:?}", i, entry);
+            if !status.success() {
+                eprintln!("Command failed: {}", command);
+            }
         }
     }
+
+    Ok(())
 }
